@@ -2,8 +2,11 @@
 import type { Event as ElectronEvent } from 'electron'
 import { createRequire } from 'node:module'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { app, BrowserWindow, ipcMain, Menu, protocol, screen } from 'electron'
 import { initApi } from './api'
+import { registerApiRequestHandler } from './api/requestIpc'
+import { resolveApiSessionToken } from './api/sessionAuth'
 import { cleanupDockBadge, refreshDockBadge } from './dockBadge'
 import { resolveFolderIconResponse } from './folderIcons'
 import { registerIPC } from './ipc'
@@ -27,6 +30,7 @@ import { startTasksCleanupScheduler, stopTasksCleanupScheduler } from './tasks'
 import { checkForUpdates } from './updates'
 import { isSqliteFile, log } from './utils'
 import { DEFAULT_WINDOW_BOUNDS, normalizeWindowBounds } from './windowBounds'
+import { mainWindowWebPreferences } from './windowSecurity'
 
 process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = 'true'
 
@@ -130,7 +134,7 @@ else {
   app.setAsDefaultProtocolClient('masscode')
 }
 
-function createWindow() {
+function createWindow(sessionToken: string) {
   const bounds = normalizeWindowBounds(
     store.app.get('window.bounds'),
     screen.getAllDisplays(),
@@ -141,16 +145,28 @@ function createWindow() {
     ...bounds,
     titleBarStyle: process.platform === 'darwin' ? 'hidden' : 'default',
     webPreferences: {
+      ...mainWindowWebPreferences,
       preload: path.join(__dirname, 'preload.js'),
-      nodeIntegration: true,
-      webSecurity: false,
     },
   })
 
   Menu.setApplicationMenu(createMainMenu())
 
+  const rendererUrl = isDev
+    ? `http://localhost:${process.env.DEV_PORT || 5177}`
+    : pathToFileURL(
+        path.join(__dirname, '../../build/renderer/index.html'),
+      ).toString()
+
+  registerApiRequestHandler(
+    mainWindow.webContents,
+    rendererUrl,
+    sessionToken,
+    store.preferences.get('api.port') as number,
+  )
+
   if (isDev) {
-    mainWindow.loadURL(`http://localhost:${process.env.DEV_PORT || 5177}`)
+    mainWindow.loadURL(rendererUrl)
     mainWindow.webContents.openDevTools()
   }
   else {
@@ -181,6 +197,11 @@ if (!gotTheLock) {
 }
 else {
   app.whenReady().then(async () => {
+    const apiSessionToken = resolveApiSessionToken(
+      isDev && !app.isPackaged,
+      process.env.MASSCODE_API_TOKEN,
+    )
+
     protocol.handle('masscode', async (request) => {
       const url = new URL(request.url)
 
@@ -282,7 +303,7 @@ else {
     }
 
     try {
-      createWindow()
+      createWindow(apiSessionToken)
     }
     catch (error) {
       log('Error creating window', error)
@@ -310,7 +331,7 @@ else {
     }
 
     try {
-      await initApi()
+      await initApi(apiSessionToken)
     }
     catch (error) {
       log('Error initializing API', error)
